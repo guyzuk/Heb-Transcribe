@@ -1,0 +1,101 @@
+name: build-binaries
+
+# בונה את whisper-cli ו-ffmpeg (LGPL + libass) לכל מערכת, ומעלה אותם כ-artifact בשם bin-<מערכת>.
+# מפעילים ידנית: Actions -> build-binaries -> Run workflow
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["bin-*"]
+
+env:
+  WHISPER_REF: v1.9.4
+  FFMPEG_REF: n7.1.5
+
+jobs:
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: mac-arm64
+            runner: macos-15
+          - key: mac-x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: brew install cmake pkg-config nasm meson ninja
+
+      - name: whisper.cpp (Metal, static)
+        run: |
+          git clone --depth 1 --branch "$WHISPER_REF" https://github.com/ggml-org/whisper.cpp
+          cmake -S whisper.cpp -B wb -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_NATIVE=OFF \
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF -DWHISPER_SDL2=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+          cmake --build wb --target whisper-cli -j 4
+          mkdir -p out/${{ matrix.key }}
+          cp wb/bin/whisper-cli out/${{ matrix.key }}/
+
+      - name: ffmpeg (LGPL, minimal, libass)
+        run: bash build/ffmpeg-mac.sh "$FFMPEG_REF" "$PWD/out/${{ matrix.key }}"
+
+      - name: Smoke test
+        run: |
+          cd out/${{ matrix.key }}
+          ./whisper-cli -h 2>&1 | grep dtw
+          ./ffmpeg -hide_banner -filters | grep subtitles
+          ./ffmpeg -hide_banner -encoders | grep prores_ks
+          otool -L ffmpeg whisper-cli
+          ls -la .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.key }}
+          path: out/${{ matrix.key }}
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: whisper.cpp (CPU, AVX2, static)
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:WHISPER_REF https://github.com/ggml-org/whisper.cpp
+          cmake -S whisper.cpp -B wb -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON `
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build wb --config Release --target whisper-cli -j 4
+          New-Item -ItemType Directory -Force out/win-x64 | Out-Null
+          Copy-Item wb/bin/Release/whisper-cli.exe out/win-x64/
+
+      - name: ffmpeg (BtbN LGPL shared build, includes libass)
+        shell: pwsh
+        run: |
+          $rel = Invoke-RestMethod https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest
+          $asset = $rel.assets | Where-Object { $_.name -match '^ffmpeg-n7\.1.*-win64-lgpl-shared-7\.1\.zip$' } | Select-Object -First 1
+          if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -match 'win64-lgpl-shared\.zip$' } | Select-Object -First 1 }
+          Write-Host "Using $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile ff.zip
+          Expand-Archive ff.zip -DestinationPath ff
+          $bin = Get-ChildItem ff -Recurse -Directory -Filter bin | Select-Object -First 1
+          Copy-Item "$($bin.FullName)\ffmpeg.exe" out/win-x64/
+          Copy-Item "$($bin.FullName)\*.dll" out/win-x64/
+          $lic = Get-ChildItem ff -Recurse -File -Filter LICENSE* | Select-Object -First 1
+          if ($lic) { Copy-Item $lic.FullName out/win-x64/FFMPEG-LICENSE.txt }
+          $asset.name | Out-File out/win-x64/FFMPEG-BUILD.txt
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          cd out/win-x64
+          ./whisper-cli.exe -h 2>&1 | Select-String dtw
+          ./ffmpeg.exe -hide_banner -filters | Select-String subtitles
+          ./ffmpeg.exe -hide_banner -encoders | Select-String prores_ks
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-win-x64
+          path: out/win-x64
