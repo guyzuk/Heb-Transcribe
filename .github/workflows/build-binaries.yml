@@ -113,7 +113,7 @@ jobs:
       - name: Zip
         run: |
           cd dist
-          for d in bin-*; do (cd "$d" && chmod +x whisper-cli ffmpeg 2>/dev/null; zip -qr "../$d.zip" .); done
+          for d in bin-*; do (cd "$d" && chmod +x whisper-cli ffmpeg 2>/dev/null || true; zip -qr "../$d.zip" .); done
           ls -la
       - uses: softprops/action-gh-release@v2
         with:
